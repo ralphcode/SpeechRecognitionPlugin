@@ -15,6 +15,7 @@
 @property (assign) NSTimer *timer;
 @property (assign) BOOL speechStartSent;
 @property (assign) BOOL resetAudioEngine;
+@property (assign) BOOL isSpeaking;
 
 - (void) init:(CDVInvokedUrlCommand*)command;
 - (void) start:(CDVInvokedUrlCommand*)command;
