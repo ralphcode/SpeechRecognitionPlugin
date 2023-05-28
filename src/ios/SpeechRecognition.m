@@ -3,6 +3,8 @@
 //  Updates and enhancements by Wayne Fisher (Fisherlea Systems) 2018-2019.
 //
 
+// REFERENCE: https://github.com/csdcorp/speech_to_text/blob/main/speech_to_text/ios/Classes/SwiftSpeechToTextPlugin.swift
+
 #import "SpeechRecognition.h"
 #import <Speech/Speech.h>
 
@@ -18,36 +20,36 @@
 
 @implementation SpeechRecognition
 
-- (void) pluginInitialize {
-    NSError *error;
+const NSNotificationName SpeechSynthesisNotification = @"SPEECHSYNTHESIS.STATECHANGE";
 
+- (void) pluginInitialize {
+    
+    DBG(@"[sr] pluginInitialize()");
+    
     // We need to be notified of route changes to know when a
     // Bluetooth headset becomes active. The audioEngine needs to be
     // re-initialized in this case.
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(routeChanged:) name:AVAudioSessionRouteChangeNotification object:nil];
-
-    DBG(@"[sr] pluginInitialize()");
-
-    NSString * output = [self.commandDelegate.settings objectForKey:[@"speechRecognitionAllowAudioOutput" lowercaseString]];
-    if(output && [output caseInsensitiveCompare:@"true"] == NSOrderedSame) {
+    
+    // Listen for changes from our SpeechSynthesis Controller;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleTalkingNotification:) name:SpeechSynthesisNotification object:nil];
+    
+    // Configure mode;
+    self.sessionCategory = AVAudioSessionCategoryPlayAndRecord;
+    /*
+     NSString * output = [self.commandDelegate.settings objectForKey:[@"speechRecognitionAllowAudioOutput" lowercaseString]];
+     if(output && [output caseInsensitiveCompare:@"true"] == NSOrderedSame) {
         // If the allow audio output preference is set, the need to change the session category.
         // This allows for speech recognition and speech synthesis to be used in the same app.
         self.sessionCategory = AVAudioSessionCategoryPlayAndRecord;
     } else {
         // Maintain the original functionality for backwards compatibility.
         self.sessionCategory = AVAudioSessionCategoryRecord;
-    }
+    }*/
 
     self.resetAudioEngine = NO;
     self.audioEngine = [[AVAudioEngine alloc] init];
     self.audioSession = [AVAudioSession sharedInstance];
-
-    if(![self.audioSession setCategory:self.sessionCategory
-                                  mode:AVAudioSessionModeMeasurement
-                               options:(AVAudioSessionCategoryOptionAllowBluetooth|AVAudioSessionCategoryOptionAllowBluetoothA2DP)
-                                 error:&error]) {
-        DBG1(@"[sr] Unable to setCategory: %@", error);
-    }
 }
 
 - (void)routeChanged:(NSNotification *)notification {
@@ -93,7 +95,9 @@
                 category = self.sessionCategory;
             }
             
-            [self.audioSession setCategory:category error:nil];
+            if ([self.audioSession category] != category) {
+                [self.audioSession setCategory:category error:nil];
+            }
         }
     }
 
@@ -181,13 +185,12 @@
     DBG(@"[sr] startRecognitionProcess");
     
     // Cancel the previous task if it's running.
-    if ( self.recognitionTask ) {
-        // DBG(@"[sr] startRecognitionProcess::: recognitionTask cancel");
-        // [self.recognitionTask cancel];
-        // self.recognitionTask = nil;
-        // dispatch_async(dispatch_get_main_queue(), ^{
-        //     [self startRecognitionProcess];
-        // });
+    if (self.isSpeaking) {
+        DBG(@"[sr] startRecognitionProcess::: isSpeaking:: waiting");
+        return;
+    } else if (self.recognitionTask) {
+        DBG(@"[sr] startRecognitionProcess::: recognitionTask already running");
+        [self initAudioSession];
         return;
     }
     [self initAudioSession];
@@ -195,9 +198,9 @@
     self.recognitionRequest = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
     if (@available(iOS 13, *))
         if (self.sfSpeechRecognizer.supportsOnDeviceRecognition)
-                self.recognitionRequest.requiresOnDeviceRecognition = YES;
+            self.recognitionRequest.requiresOnDeviceRecognition = YES;
     self.recognitionRequest.shouldReportPartialResults = true; // [[self.command argumentAtIndex:1] boolValue];
-
+    
     self.speechStartSent = FALSE;
     
     __weak __typeof(self) weakSelf = self;
@@ -229,7 +232,7 @@
                     NSMutableDictionary * resultDict = [[NSMutableDictionary alloc]init];
                     NSString *string = transcription.formattedString;
                     DBG2(@"[sr] resultHandler transcription (final %d): %@", result.isFinal, string);
-
+                    
                     [resultDict setValue:string forKey:@"transcript"];
                     [resultDict setValue:[NSNumber numberWithBool:result.isFinal] forKey:@"final"];
                     if(transcription.segments.count == 0) {
@@ -251,35 +254,62 @@
             if ( result.isFinal ) {
                 DBG(@"[sr] resultHandler isFinal, sending results");
                 [weakSelf sendRecognitionResults:alternatives];
+                [weakSelf stopAndRelease];
             } else {
                 DBG(@"[sr] resultHandler setting timer to send results");
-                self.timer = [NSTimer scheduledTimerWithTimeInterval:1.25 repeats:NO block:^(NSTimer * _Nonnull timer) {
+                self.timer = [NSTimer scheduledTimerWithTimeInterval:0.75 repeats:NO block:^(NSTimer * _Nonnull timer) {
                     DBG(@"[sr] resultHandler setting timer complete");
                     [timer invalidate];
                     weakSelf.timer = nil;
                     [weakSelf sendRecognitionResults:alternatives];
+                    [weakSelf stopAndRelease];
                 }];
             }
-    
+            
         }
     }];
-
-    AVAudioFormat *recordingFormat = [self.audioEngine.inputNode outputFormatForBus:0];
-    // AVAudioFormat *recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32 sampleRate:44100 channels:1 interleaved:NO]; // Use a known valid format
-    DBG1(@"[sr] recordingFormat: sampleRate:%lf", recordingFormat.sampleRate);
+    
+    // Tidy up Tap incase we missed it;
     [self.audioEngine.inputNode removeTapOnBus:0];
-    [self.audioEngine.inputNode installTapOnBus:0 bufferSize:1024 format:recordingFormat block:^(AVAudioPCMBuffer * _Nonnull buffer, AVAudioTime * _Nonnull when) {
-        [self.recognitionRequest appendAudioPCMBuffer:buffer];
-    }];
-    [self.audioEngine prepare];
+    [self.audioEngine reset];
     
     NSError *error = nil;
+    if(![self.audioSession setCategory:self.sessionCategory
+                                  mode:AVAudioSessionModeMeasurement
+                               options:(AVAudioSessionCategoryOptionDefaultToSpeaker|
+                                        AVAudioSessionCategoryOptionAllowBluetooth|
+                                        AVAudioSessionCategoryOptionAllowBluetoothA2DP)
+                                 error:&error]) {
+        DBG1(@"[sr] Unable to setCategory: %@", error);
+    }
+    
+    // Get the sampling rate of the input node
+    AVAudioFormat *format = [self.audioEngine.inputNode outputFormatForBus:0];
+    double hardwareSampleRate = [self.audioSession sampleRate];
+    AVAudioFormat *recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:format.commonFormat
+                                                                      sampleRate:hardwareSampleRate
+                                                                        channels:format.channelCount
+                                                                     interleaved:format.isInterleaved];
+    DBG2(@"[sr] recordingFormat: rates: %1f v.s. %1f", hardwareSampleRate, format.sampleRate);
+    
+    @try {
+        [self.audioEngine.inputNode installTapOnBus:0 bufferSize:1024 format:recordingFormat block:^(AVAudioPCMBuffer * _Nonnull buffer, AVAudioTime * _Nonnull when) {
+            [self.recognitionRequest appendAudioPCMBuffer:buffer];
+        }];
+    } @catch (NSException *exception) {
+        DBG1(@"[sr] installTapOnBus: exception: %@", exception.reason);
+        [self stopAndRelease];
+        return;
+    }
+    [self.audioEngine prepare];
+    
     if (![self.audioEngine startAndReturnError:&error]) {
         DBG1(@"[sr] Error: %@", [error localizedDescription]);
         [self sendErrorWithMessage:@"unable to start." andCode:5];
     } else {
         [self sendEvent:(NSString *)@"audiostart"];
     }
+
 }
 
 - (void) sendRecognitionResults:(NSMutableArray *)alternatives
@@ -293,7 +323,7 @@
     }
     
     // [self startRecognitionProcess]; // Start a new listener;
-    if (self.recognitionTask = nil) {
+    if (self.recognitionTask != nil) {
         [self.recognitionTask cancel];
         self.recognitionTask = nil;
     }
@@ -304,10 +334,17 @@
 {
     NSError *error;
     DBG(@"[sr] initAudioSession");
-    
-    if(![self.audioSession setActive:YES
-                         withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error]) {
+    if(self.audioSession && ![self.audioSession setActive:YES withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error]) {
         DBG1(@"[sr] Unable to setActive:YES: %@", error);
+    }
+}
+
+- (void) deactivateAudioSession
+{
+    NSError *error;
+    DBG(@"[sr] deactivateAudioSession");
+    if(self.audioSession && ![self.audioSession setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error]) {
+        DBG1(@"[sr] Unable to setActive:NO: %@", error);
     }
 }
 
@@ -409,16 +446,38 @@
      * Maybe should be performed by HeadsetControl.disconnect???
      * Or maybe allow use of a plugin parameter/option to disable this???
     if(self.audioSession) {
-        NSError *error;
-
-        DBG(@"[sr] setActive:NO");
-        if(![self.audioSession setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error]) {
-            DBG1(@"[sr] Unable to setActive:NO: %@", error);
-        }
+        [self deactivateAudioSession];
     }
     */
 
     [self sendEvent:(NSString *)@"end"];
+}
+
+- (void)handleTalkingNotification:(NSNotification *)notification {
+    NSString *state = notification.userInfo[@"state"]; // starting, start, end, pause, resume
+    DBG1(@"[sr] handleTalkingNotification: state: %@", state);
+    self.isSpeaking = [state isEqualToString:@"start"] || [state isEqualToString:@"resume"] || [state isEqualToString:@"starting"];
+    
+    // Do we need to stop or start our listener?
+    if (!self.audioEngine) {
+        DBG(@"[sr] handleTalkingNotification: not active");
+    } else if ([state isEqualToString:@"start"] || [state isEqualToString:@"resume"]) {
+        // Handle start or resume state
+        [self.audioEngine stop];
+        if (self.recognitionTask != nil) {
+            [self.recognitionTask cancel];
+            self.recognitionTask = nil;
+        }
+    } else if ([state isEqualToString:@"end"] || [state isEqualToString:@"pause"]) {
+        // Handle end or pause state
+        [self startRecognitionProcess];
+    } else {
+        DBG1(@"[sr] handleTalkingNotification: Unexpected state: %@", state);
+    }
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:SpeechSynthesisNotification object:nil];
 }
 
 @end
