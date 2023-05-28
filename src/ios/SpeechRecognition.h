@@ -12,6 +12,7 @@
 @property (nonatomic, strong) SFSpeechRecognitionTask *recognitionTask;
 
 @property (assign) NSString *sessionCategory;
+@property (assign) NSTimer *timer;
 @property (assign) BOOL speechStartSent;
 @property (assign) BOOL resetAudioEngine;
 
