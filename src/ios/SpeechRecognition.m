@@ -6,7 +6,7 @@
 #import "SpeechRecognition.h"
 #import <Speech/Speech.h>
 
-#if 0
+#if 1
 #define DBG(a)          NSLog(a)
 #define DBG1(a, b)      NSLog(a, b)
 #define DBG2(a, b, c)   NSLog(a, b, c)
@@ -46,7 +46,7 @@
                                   mode:AVAudioSessionModeMeasurement
                                options:(AVAudioSessionCategoryOptionAllowBluetooth|AVAudioSessionCategoryOptionAllowBluetoothA2DP)
                                  error:&error]) {
-        NSLog(@"[sr] Unable to setCategory: %@", error);
+        DBG1(@"[sr] Unable to setCategory: %@", error);
     }
 }
 
@@ -61,29 +61,29 @@
     AVAudioSessionPortDescription *port;
 
     if ([reason unsignedIntegerValue] == AVAudioSessionRouteChangeReasonNewDeviceAvailable) {
-        NSLog(@"[sr] AVAudioSessionRouteChangeReasonNewDeviceAvailable");
+        DBG(@"[sr] AVAudioSessionRouteChangeReasonNewDeviceAvailable");
         resetAudioEngine = YES;
 
         route = self.audioSession.currentRoute;
         port = route.inputs[0];
-        NSLog(@"[sr] New device is %@", port.portType);
+        DBG1(@"[sr] New device is %@", port.portType);
     } else if ([reason unsignedIntegerValue] == AVAudioSessionRouteChangeReasonOldDeviceUnavailable) {
-        NSLog(@"[sr] AVAudioSessionRouteChangeReasonOldDeviceUnavailable");
+        DBG(@"[sr] AVAudioSessionRouteChangeReasonOldDeviceUnavailable");
         resetAudioEngine = YES;
 
         route = [notification.userInfo objectForKey:AVAudioSessionRouteChangePreviousRouteKey];
         port = route.inputs[0];
-        NSLog(@"[sr] Removed device %@", port.portType);
+        DBG1(@"[sr] Removed device %@", port.portType);
 
         route = self.audioSession.currentRoute;
         port = route.inputs[0];
-        NSLog(@"[sr] Now using device %@", port.portType);
+        DBG1(@"[sr] Now using device %@", port.portType);
     } else if ([reason unsignedIntegerValue] == AVAudioSessionRouteChangeReasonCategoryChange) {
-        NSLog(@"[sr] AVAudioSessionRouteChangeReasonCategoryChange");
+        DBG(@"[sr] AVAudioSessionRouteChangeReasonCategoryChange");
         
         AVAudioSessionCategory category = [self.audioSession category];
         
-        NSLog(@"[sr] AVAudioSession category: %@", category);
+        DBG1(@"[sr] AVAudioSession category: %@", category);
         
         if(![category isEqualToString:AVAudioSessionCategoryRecord] &&
            ![category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
@@ -102,7 +102,7 @@
         // re-initialize the audioEngine to adapt to the different
         // sampling rate of the Bluetooth headset (8kHz) vs the mic (44.1kHz).
 
-        NSLog(@"[sr] Need to reset audioEngine");
+        DBG(@"[sr] Need to reset audioEngine");
         self.resetAudioEngine = YES;
 
         // If we are currently running, we need to stop and release the
@@ -114,7 +114,7 @@
 - (void) init:(CDVInvokedUrlCommand*)command
 {
     // This may be called multiple times by different instances of the Javascript SpeechRecognition object.
-    NSLog(@"[sr] init()");
+    DBG(@"[sr] init()");
 
     self.pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
     [self.commandDelegate sendPluginResult:self.pluginResult callbackId:command.callbackId];
@@ -167,92 +167,147 @@
 {
     DBG1(@"[sr] recordAndRecognizeWithLang(%@)", lang);
     NSLocale *locale = [[NSLocale alloc] initWithLocaleIdentifier:lang];
+    if (self.sfSpeechRecognizer != nil) self.sfSpeechRecognizer = nil;
     self.sfSpeechRecognizer = [[SFSpeechRecognizer alloc] initWithLocale:locale];
     if (!self.sfSpeechRecognizer) {
         [self sendErrorWithMessage:@"The language is not supported" andCode:7];
     } else {
+        [self startRecognitionProcess];
+    }
+}
 
-        // Cancel the previous task if it's running.
-        if ( self.recognitionTask ) {
-            [self.recognitionTask cancel];
-            self.recognitionTask = nil;
+-(void) startRecognitionProcess
+{
+    DBG(@"[sr] startRecognitionProcess");
+    
+    // Cancel the previous task if it's running.
+    if ( self.recognitionTask ) {
+        // DBG(@"[sr] startRecognitionProcess::: recognitionTask cancel");
+        // [self.recognitionTask cancel];
+        // self.recognitionTask = nil;
+        // dispatch_async(dispatch_get_main_queue(), ^{
+        //     [self startRecognitionProcess];
+        // });
+        return;
+    }
+    [self initAudioSession];
+    
+    self.recognitionRequest = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
+    if (@available(iOS 13, *))
+        if (self.sfSpeechRecognizer.supportsOnDeviceRecognition)
+                self.recognitionRequest.requiresOnDeviceRecognition = YES;
+    self.recognitionRequest.shouldReportPartialResults = true; // [[self.command argumentAtIndex:1] boolValue];
+
+    self.speechStartSent = FALSE;
+    
+    __weak __typeof(self) weakSelf = self;
+    self.recognitionTask = [self.sfSpeechRecognizer recognitionTaskWithRequest:self.recognitionRequest resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
+        
+        DBG(@"[sr] startRecognitionProcess::: resultHandler");
+        
+        if (error) {
+            DBG2(@"[sr] resultHandler error (%d) %@", (int) error.code, error.description);
+            [weakSelf stopAndRelease];
+            [weakSelf sendErrorWithMessage:error.localizedDescription andCode:3];
+            return;
         }
-
-        [self initAudioSession];
-
-        self.recognitionRequest = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
-        self.recognitionRequest.shouldReportPartialResults = [[self.command argumentAtIndex:1] boolValue];
-
-        self.speechStartSent = FALSE;
-
-        self.recognitionTask = [self.sfSpeechRecognizer recognitionTaskWithRequest:self.recognitionRequest resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
-
-            if (error) {
-                NSLog(@"[sr] resultHandler error (%d) %@", (int) error.code, error.description);
-                [self stopAndRelease];
-                [self sendErrorWithMessage:error.localizedDescription andCode:3];
-            }
-
-            if(!self.speechStartSent) {
-                [self sendEvent:(NSString *)@"speechstart"];
-                self.speechStartSent = TRUE;
-            }
-
-            if (result) {
-                NSMutableArray * alternatives = [[NSMutableArray alloc] init];
-                int maxAlternatives = [[self.command argumentAtIndex:2] intValue];
-                for ( SFTranscription *transcription in result.transcriptions ) {
-                    if (alternatives.count < maxAlternatives) {
-                        float confMed = 0, confidence;
-                        for ( SFTranscriptionSegment *transcriptionSegment in transcription.segments ) {
-                            //NSLog(@"[sr] transcriptionSegment.confidence %f", transcriptionSegment.confidence);
-                            confMed +=transcriptionSegment.confidence;
-                        }
-                        NSMutableDictionary * resultDict = [[NSMutableDictionary alloc]init];
-                        [resultDict setValue:transcription.formattedString forKey:@"transcript"];
-                        [resultDict setValue:[NSNumber numberWithBool:result.isFinal] forKey:@"final"];
-                        if(transcription.segments.count == 0) {
-                            DBG(@"*** No transcriptions for result!");
-                            confidence = 0;
-                        } else {
-                            confidence = confMed/transcription.segments.count;
-                        }
-                        [resultDict setValue:[NSNumber numberWithFloat:confidence] forKey:@"confidence"];
-                        [alternatives addObject:resultDict];
+        if(!weakSelf.speechStartSent) {
+            [weakSelf sendEvent:(NSString *)@"speechstart"];
+            weakSelf.speechStartSent = TRUE;
+        }
+        // Set a timer to send what we got after a nominal time
+        if (result) {
+            NSMutableArray *alternatives = [[NSMutableArray alloc] init];
+            int maxAlternatives = [[weakSelf.command argumentAtIndex:2] intValue];
+            for ( SFTranscription *transcription in result.transcriptions ) {
+                if (alternatives.count < maxAlternatives) {
+                    float confMed = 0, confidence;
+                    for ( SFTranscriptionSegment *transcriptionSegment in transcription.segments ) {
+                        DBG1(@"[sr] resultHandler transcriptionSegment.confidence %f", transcriptionSegment.confidence);
+                        confMed +=transcriptionSegment.confidence;
                     }
-                }
-                [self sendResults:@[alternatives]];
-                if ( result.isFinal ) {
-                    if(self.speechStartSent) {
-                        [self sendEvent:(NSString *)@"speechend"];
-                        self.speechStartSent = FALSE;
-                    }
+                    NSMutableDictionary * resultDict = [[NSMutableDictionary alloc]init];
+                    NSString *string = transcription.formattedString;
+                    DBG2(@"[sr] resultHandler transcription (final %d): %@", result.isFinal, string);
 
-                    [self stopAndRelease];
+                    [resultDict setValue:string forKey:@"transcript"];
+                    [resultDict setValue:[NSNumber numberWithBool:result.isFinal] forKey:@"final"];
+                    if(transcription.segments.count == 0) {
+                        DBG(@"[sr] resultHandler *** No transcriptions for result!");
+                        confidence = 0;
+                    } else {
+                        confidence = confMed/transcription.segments.count;
+                    }
+                    [resultDict setValue:[NSNumber numberWithFloat:confidence] forKey:@"confidence"];
+                    [alternatives addObject:resultDict];
                 }
             }
-        }];
+            
+            // Now send back the results;
+            if (weakSelf.timer != nil) {
+                [weakSelf.timer invalidate];
+                weakSelf.timer = nil;
+            }
+            if ( result.isFinal ) {
+                DBG(@"[sr] resultHandler isFinal, sending results");
+                [weakSelf sendRecognitionResults:alternatives];
+            } else {
+                DBG(@"[sr] resultHandler setting timer to send results");
+                self.timer = [NSTimer scheduledTimerWithTimeInterval:1.25 repeats:NO block:^(NSTimer * _Nonnull timer) {
+                    DBG(@"[sr] resultHandler setting timer complete");
+                    [timer invalidate];
+                    weakSelf.timer = nil;
+                    [weakSelf sendRecognitionResults:alternatives];
+                }];
+            }
+    
+        }
+    }];
 
-        AVAudioFormat *recordingFormat = [self.audioEngine.inputNode outputFormatForBus:0];
-        DBG1(@"[sr] recordingFormat: sampleRate:%lf", recordingFormat.sampleRate);
-        [self.audioEngine.inputNode installTapOnBus:0 bufferSize:1024 format:recordingFormat block:^(AVAudioPCMBuffer * _Nonnull buffer, AVAudioTime * _Nonnull when) {
-            [self.recognitionRequest appendAudioPCMBuffer:buffer];
-        }];
-
-        [self.audioEngine prepare];
-        [self.audioEngine startAndReturnError:nil];
-
+    AVAudioFormat *recordingFormat = [self.audioEngine.inputNode outputFormatForBus:0];
+    // AVAudioFormat *recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32 sampleRate:44100 channels:1 interleaved:NO]; // Use a known valid format
+    DBG1(@"[sr] recordingFormat: sampleRate:%lf", recordingFormat.sampleRate);
+    [self.audioEngine.inputNode removeTapOnBus:0];
+    [self.audioEngine.inputNode installTapOnBus:0 bufferSize:1024 format:recordingFormat block:^(AVAudioPCMBuffer * _Nonnull buffer, AVAudioTime * _Nonnull when) {
+        [self.recognitionRequest appendAudioPCMBuffer:buffer];
+    }];
+    [self.audioEngine prepare];
+    
+    NSError *error = nil;
+    if (![self.audioEngine startAndReturnError:&error]) {
+        DBG1(@"[sr] Error: %@", [error localizedDescription]);
+        [self sendErrorWithMessage:@"unable to start." andCode:5];
+    } else {
         [self sendEvent:(NSString *)@"audiostart"];
     }
+}
+
+- (void) sendRecognitionResults:(NSMutableArray *)alternatives
+{
+    DBG(@"[sr] sendRecognitionResults");
+    
+    [self sendResults:@[alternatives]];
+    if(self.speechStartSent) {
+        [self sendEvent:(NSString *)@"speechend"];
+        self.speechStartSent = FALSE;
+    }
+    
+    // [self startRecognitionProcess]; // Start a new listener;
+    if (self.recognitionTask = nil) {
+        [self.recognitionTask cancel];
+        self.recognitionTask = nil;
+    }
+    [self recognize]; // Start a new listener;
 }
 
 - (void) initAudioSession
 {
     NSError *error;
-
+    DBG(@"[sr] initAudioSession");
+    
     if(![self.audioSession setActive:YES
                          withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error]) {
-        NSLog(@"[sr] Unable to setActive:YES: %@", error);
+        DBG1(@"[sr] Unable to setActive:YES: %@", error);
     }
 }
 
@@ -275,7 +330,7 @@
     self.pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:event];
     [self.pluginResult setKeepCallbackAsBool:YES];
     [self.commandDelegate sendPluginResult:self.pluginResult callbackId:self.command.callbackId];
-    DBG(@"[sr] sendResults() complete");
+    // DBG(@"[sr] sendResults() complete");
 }
 
 -(void) sendErrorWithMessage:(NSString *)errorMessage andCode:(NSInteger) code
@@ -288,7 +343,7 @@
     self.pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:event];
     [self.pluginResult setKeepCallbackAsBool:NO];
     [self.commandDelegate sendPluginResult:self.pluginResult callbackId:self.command.callbackId];
-    DBG(@"[sr] sendErrorWithMessage() complete");
+    // DBG(@"[sr] sendErrorWithMessage() complete");
 }
 
 -(void) sendEvent:(NSString *) eventType
@@ -299,13 +354,14 @@
     self.pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:event];
     [self.pluginResult setKeepCallbackAsBool:YES];
     [self.commandDelegate sendPluginResult:self.pluginResult callbackId:self.command.callbackId];
-    DBG(@"[sr] sendEvent() complete");
+    // DBG(@"[sr] sendEvent() complete");
 }
 
 -(void) stop:(CDVInvokedUrlCommand*)command
 {
     DBG(@"[sr] stop()");
     [self stopOrAbort];
+    [self stopAndRelease];
 }
 
 -(void) abort:(CDVInvokedUrlCommand*)command
@@ -319,6 +375,7 @@
     DBG(@"[sr] stopOrAbort()");
     if (self.audioEngine.isRunning) {
         [self.audioEngine stop];
+        [self.audioEngine.inputNode removeTapOnBus:0];
         [self sendEvent:(NSString *)@"audioend"];
 
         if(self.recognitionRequest) {
@@ -354,9 +411,9 @@
     if(self.audioSession) {
         NSError *error;
 
-        NSLog(@"setActive:NO");
+        DBG(@"[sr] setActive:NO");
         if(![self.audioSession setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error]) {
-            NSLog(@"[sr] Unable to setActive:NO: %@", error);
+            DBG1(@"[sr] Unable to setActive:NO: %@", error);
         }
     }
     */
