@@ -58,7 +58,7 @@ const NSNotificationName SpeechSynthesisNotification = @"SPEECHSYNTHESIS.STATECH
     NSNumber *reason = [notification.userInfo objectForKey:AVAudioSessionRouteChangeReasonKey];
 
     DBG(@"[sr] routeChanged()");
-
+    
     AVAudioSessionRouteDescription *route;
     AVAudioSessionPortDescription *port;
 
@@ -67,19 +67,26 @@ const NSNotificationName SpeechSynthesisNotification = @"SPEECHSYNTHESIS.STATECH
         resetAudioEngine = YES;
 
         route = self.audioSession.currentRoute;
-        port = route.inputs[0];
-        DBG1(@"[sr] New device is %@", port.portType);
+        if (route.inputs.count > 0) {
+            port = route.inputs[0];
+            DBG1(@"[sr] New device is %@", port.portType);
+        } else {
+            DBG(@"[sr] Device removed");
+        }
     } else if ([reason unsignedIntegerValue] == AVAudioSessionRouteChangeReasonOldDeviceUnavailable) {
         DBG(@"[sr] AVAudioSessionRouteChangeReasonOldDeviceUnavailable");
         resetAudioEngine = YES;
 
         route = [notification.userInfo objectForKey:AVAudioSessionRouteChangePreviousRouteKey];
-        port = route.inputs[0];
-        DBG1(@"[sr] Removed device %@", port.portType);
-
-        route = self.audioSession.currentRoute;
-        port = route.inputs[0];
-        DBG1(@"[sr] Now using device %@", port.portType);
+        if (route.inputs.count > 0) {
+            port = route.inputs[0];
+            DBG1(@"[sr] Removed device %@", port.portType);
+            route = self.audioSession.currentRoute;
+            port = route.inputs[0];
+            DBG1(@"[sr] Now using device %@", port.portType);
+        } else {
+            DBG(@"[sr] Device removed");
+        }
     } else if ([reason unsignedIntegerValue] == AVAudioSessionRouteChangeReasonCategoryChange) {
         DBG(@"[sr] AVAudioSessionRouteChangeReasonCategoryChange");
         
